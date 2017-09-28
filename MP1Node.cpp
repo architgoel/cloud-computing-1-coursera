@@ -6,7 +6,6 @@
  **********************************/
 
 #include "MP1Node.h"
-
 /*
  * Note: You can change/add any functions in MP1Node.{h,cpp}
  */
@@ -65,9 +64,9 @@ int MP1Node::enqueueWrapper(void *env, char *buff, int size) {
  * 				Called by the application layer.
  */
 void MP1Node::nodeStart(char *servaddrstr, short servport) {
+
     Address joinaddr;
     joinaddr = getJoinAddress();
-
     // Self booting routines
     if( initThisNode(&joinaddr) == -1 ) {
 #ifdef DEBUGLOG
@@ -96,9 +95,6 @@ int MP1Node::initThisNode(Address *joinaddr) {
 	/*
 	 * This function is partially implemented and may require changes
 	 */
-	int id = *(int*)(&memberNode->addr.addr);
-	int port = *(short*)(&memberNode->addr.addr[4]);
-
 	memberNode->bFailed = false;
 	memberNode->inited = true;
 	memberNode->inGroup = false;
@@ -163,6 +159,7 @@ int MP1Node::finishUpThisNode(){
    /*
     * Your code goes here
     */
+    return 0;
 }
 
 /**
@@ -214,11 +211,71 @@ void MP1Node::checkMessages() {
  *
  * DESCRIPTION: Message handler for different message types
  */
-bool MP1Node::recvCallBack(void *env, char *data, int size ) {
-	/*
-	 * Your code goes here
-	 */
+bool MP1Node::recvCallBack(void *env, char *data, int size) {
+    MsgTypes msgType;
+    long heartbeat;
+    MessageHdr *msg = (MessageHdr*) data;
+    msgType = msg->msgType;
+    Address addr;
+    memcpy(addr.addr, data + sizeof(MessageHdr), 6 * sizeof(char));
+    memcpy(&heartbeat, data + sizeof(MessageHdr) + sizeof(addr.addr) + 1,
+            sizeof(long));
+
+    int id = getId(addr);
+    short port = getPort(addr);
+    if (msgType == MsgTypes::JOINREQ) {
+        memberNode->memberList.push_back(
+                *(new MemberListEntry(id, port, heartbeat,
+                        (long) par->globaltime)));
+        char * newMsg = serializeMessage(MsgTypes::JOINREP, memberNode->addr,
+                memberNode->heartbeat);
+        size_t msgsize = sizeof(MessageHdr) + sizeof(addr.addr) + sizeof(long)
+                + 1;
+        emulNet->ENsend(&memberNode->addr, &addr, (char *) newMsg, msgsize);
+        log->logNodeAdd(&memberNode->addr, &addr );
+        free(newMsg);
+    } else if (msgType == MsgTypes::JOINREP) {
+        memberNode->memberList.push_back(
+                *(new MemberListEntry(id, port, heartbeat,
+                        (long) par->globaltime)));
+        memberNode->inGroup = true;
+        log->logNodeAdd(&memberNode->addr, &addr );
+    } else if (msgType == MsgTypes::GOSSIP) {
+        int found = false;
+        if (id != getId(memberNode->addr)) {
+            for (vector<MemberListEntry>::iterator it = memberNode->memberList.begin();
+                    it != memberNode->memberList.end(); it++) {
+                if (it->id == id) {
+                    if (it->heartbeat < heartbeat) {
+                        it->heartbeat = heartbeat;
+                        it->timestamp = par->globaltime;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                MemberListEntry entry(id, port, heartbeat, par->globaltime);
+                memberNode->memberList.push_back(entry);
+                log->logNodeAdd(&memberNode->addr, &addr);
+            }
+        }
+    }
+    return true;
 }
+
+char * MP1Node::serializeMessage(MsgTypes msgType, Address addr, int heartbeat) {
+	MessageHdr *msg;
+	size_t msgsize = sizeof(MessageHdr) + sizeof(addr.addr) + sizeof(long) + 1;
+	msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+	msg->msgType = msgType;
+	memcpy((char *) (msg + 1), addr.addr, sizeof(addr.addr));
+	memcpy((char *) (msg + 1) + 1 + sizeof(addr.addr), &heartbeat,
+			sizeof(long));
+	return (char *) msg;
+}
+
+
 
 /**
  * FUNCTION NAME: nodeLoopOps
@@ -232,7 +289,51 @@ void MP1Node::nodeLoopOps() {
 	/*
 	 * Your code goes here
 	 */
+	int loc = rand() % memberNode->memberList.size();
+	int count = 0;
+	MemberListEntry entry;
+//    log->LOG(&memberNode->addr,"size of membershiplist : %d ", memberNode->memberList.size());
 
+    for (vector<MemberListEntry>::iterator it = memberNode->memberList.begin();
+            it != memberNode->memberList.end();) {
+        if(it->id == getId(memberNode->addr)) {
+            (memberNode->heartbeat)++;
+            it->heartbeat = memberNode->heartbeat;
+            it->timestamp = par->globaltime;
+        }
+
+        if(it->timestamp + TREMOVE < par->globaltime) {
+            Address add = getAddress(it->id, it->port);
+            log->logNodeRemove(&memberNode->addr, &add );
+            it = memberNode->memberList.erase(it);
+        } else {
+            it++;
+        }
+    }
+//    log->LOG(&memberNode->addr,"size of membershiplist : %d ", memberNode->memberList.size());
+
+	while(count < memberNode->memberList.size()) {
+		MemberListEntry tmp = memberNode->memberList[loc];
+		if(tmp.id != getId(memberNode->addr) && tmp.heartbeat + TFAIL >= par->globaltime) {
+			entry = tmp;
+			break;
+		}
+		loc = (loc+1) % memberNode->memberList.size();
+		count++;
+	}
+    Address entryAddress = getAddress(entry.id, entry.port);
+	for (vector<MemberListEntry>::iterator it = memberNode->memberList.begin();
+			it != memberNode->memberList.end(); it++) {
+        if (it->timestamp + TFAIL >= par->globaltime) {
+            Address add = getAddress(it->id, it->port);
+            char * msg = serializeMessage(MsgTypes::GOSSIP, add, it->heartbeat);
+            size_t msgsize = sizeof(MessageHdr) + sizeof(add.addr)
+                    + sizeof(long) + 1;
+            emulNet->ENsend(&memberNode->addr, &entryAddress, (char *) msg,
+                    msgsize);
+            free(msg);
+        }
+	}
     return;
 }
 
@@ -267,6 +368,12 @@ Address MP1Node::getJoinAddress() {
  */
 void MP1Node::initMemberListTable(Member *memberNode) {
 	memberNode->memberList.clear();
+	MemberListEntry entry(getId(memberNode->addr),
+	        getPort(memberNode->addr), memberNode->heartbeat,
+			(long)par->globaltime);
+	memberNode->memberList.push_back(entry);
+	memberNode->myPos = memberNode->memberList.begin();
+
 }
 
 /**

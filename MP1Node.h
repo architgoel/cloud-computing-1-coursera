@@ -31,6 +31,7 @@
 enum MsgTypes{
     JOINREQ,
     JOINREP,
+	GOSSIP,
     DUMMYLASTMSGTYPE
 };
 
@@ -76,6 +77,23 @@ public:
 	void initMemberListTable(Member *memberNode);
 	void printAddress(Address *addr);
 	virtual ~MP1Node();
+	char * serializeMessage(MsgTypes msgType, Address addr, int heartbeat);
+	int getId(Address address) {
+        int id = 0;
+        memcpy(&id, &address.addr[0], sizeof(int));
+        return id;
+    }
+    short getPort(Address address) {
+        short port;
+        memcpy(&port, &address.addr[4], sizeof(short));
+        return port;
+    }
+    Address getAddress(int id, short port) {
+        Address addr;
+        memcpy(&addr.addr[0], &id, sizeof(int));
+        memcpy(&addr.addr[4], &port, sizeof(short));
+        return addr;
+    }
 };
 
 #endif /* _MP1NODE_H_ */
